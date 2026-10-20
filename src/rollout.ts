@@ -49,3 +49,71 @@ export async function check(
     .run();
   return j;
 }
+
+export class RolloutWorkflow extends WorkflowEntrypoint<Env, RolloutParams> {
+  async run(event: WorkflowEvent<RolloutParams>, step: WorkflowStep): Promise<Outcome> {
+    const { rolloutId, key, version, plan } = event.payload;
+    const cfg = this.env.CONFIG.getByName(key);
+    const stillOn = async () => (await cfg.active())?.id === rolloutId;
+
+    const begun = await step.do<{ startedAt: number; from: string }>("begin", async () => {
+      const a = await cfg.begin(rolloutId, version, plan);
+      return { startedAt: a.started_at, from: a.from_version };
+    });
+    const rollBack = async (reason: string): Promise<Outcome> => {
+      await step.do<boolean>("roll back", async () => (await cfg.rollback(rolloutId, reason)).rolledBack);
+      return { status: "rolled_back", reason };
+    };
+
+    for (let i = 0; i < plan.stages.length; i++) {
+      const stage = plan.stages[i];
+      if (plan.approveBefore === i) {
+        if (!(await step.do<boolean>(`ask before ${stage.name}`, async () => (await stillOn()) && (await cfg.waiting(rolloutId, stage.name), true)))) {
+          return { status: "gone" };
+        }
+        let decision: Decision;
+        try {
+          decision = (await step.waitForEvent<Decision>(`approval before ${stage.name}`, { type: "approval", timeout: scaled(this.env, plan.approvalTimeoutMs) })).payload;
+        } catch {
+          return rollBack(`nobody approved ${stage.name} in time`);
+        }
+        if (!decision.approved) return rollBack(`${decision.by} declined ${stage.name}`);
+      }
+
+      const colos = coloSet(rolloutId, stage.percent);
+      const stageStart = await step.do<number | null>(`start ${stage.name}`, async () => {
+        if (!(await stillOn())) return null;
+        await cfg.assign(rolloutId, i, colos, stage.name);
+        return Date.now();
+      });
+      if (stageStart === null) return { status: "gone" };
+
+      const interval = scaled(this.env, stage.bakeMs / plan.checks);
+      let extensions = 0;
+      for (let n = 0; ; n++) {
+        await step.sleep(`bake ${stage.name} ${n}`, interval);
+        const endOfBake = (n + 1) % plan.checks === 0;
+        const j = await step.do<Judgment | null>(`check ${stage.name} ${n}`, async () => {
+          if (!(await stillOn())) return null;
+          return check(
+            this.env,
+            { rolloutId, key, version, from: begun.from, stage: i, n, plan, colos },
+            { stageStart, end: stageStart + interval * (n + 1), baselineEnd: begun.startedAt },
+            endOfBake,
+          );
+        });
+        if (j === null) return { status: "gone" };
+        if (j.verdict === "fail") return rollBack(`${stage.name}: ${j.reasons.join("; ")}`);
+        if (!endOfBake) continue;
+        if (j.verdict === "pass") break;
+        if (extensions === plan.maxExtensions) {
+          return rollBack(`${stage.name}: ${j.reasons.join("; ")}, still after ${extensions} extra bake${extensions === 1 ? "" : "s"}`);
+        }
+        extensions++;
+      }
+    }
+
+    const done = await step.do<boolean>("finish", async () => (await stillOn()) && (await cfg.finish(rolloutId), true));
+    return done ? { status: "completed" } : { status: "gone" };
+  }
+}
