@@ -141,5 +141,229 @@
     </section>
   </aside>
 </main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const ago = (t) => { const s = Math.max(0, (Date.now() - t) / 1000); return s < 60 ? `${s | 0}s ago` : s < 3600 ? `${(s / 60) | 0}m ago` : `${(s / 3600) | 0}h ago`; };
+const pct = (x, d = 2) => x == null ? "–" : `${(x * 100).toFixed(d)}%`;
+const short = (v) => v ? v.slice(0, 7) : "–";
+let key = null, viewing = null, last = {}, flashTimer, state = null, keyInfo = null;
+
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  key = q.get("key"); viewing = q.get("ro");
+}
+function writeHash() {
+  const q = new URLSearchParams();
+  if (key) q.set("key", key);
+  if (viewing) q.set("ro", viewing);
+  history.replaceState(null, "", `#${q}`);
+}
+readHash();
+
+function flash(text, bad = false) {
+  clearTimeout(flashTimer);
+  $("flash").textContent = text; $("flash").className = bad ? "bad" : "";
+  flashTimer = setTimeout(() => ($("flash").textContent = ""), 7000);
+}
+function changed(k, v) { const s = JSON.stringify(v); if (last[k] === s) return false; last[k] = s; return true; }
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok && r.status !== 422) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// A button that changes production needs a second click within 4 seconds.
+function twoStep(el, text, fn) {
+  el.onclick = () => {
+    if (!el.classList.contains("confirm")) {
+      const t = el.textContent; el.classList.add("confirm"); el.textContent = text;
+      setTimeout(() => { el.classList.remove("confirm"); el.textContent = t; }, 4000);
+      return;
+    }
+    el.classList.remove("confirm"); fn();
+  };
+}
+async function act(el, fn, done) {
+  if (el) el.disabled = true;
+  try { const r = await fn(); flash(typeof done === "function" ? done(r) : done); } catch (e) { flash(e.message, true); }
+  if (el) el.disabled = false;
+  tick(true);
+}
+const author = () => $("author").value.trim() || "console";
+try { $("author").value = localStorage.getItem("failsmall-author") || ""; } catch {}
+$("author").onchange = () => { try { localStorage.setItem("failsmall-author", $("author").value); } catch {} };
+
+function renderTabs() {
+  $("tabs").innerHTML = state.keys.map((k) => `<button role="tab" aria-selected="${k.key === key}" data-k="${esc(k.key)}">${esc(k.key)}${k.rollout ? `<span class="dot" title="rollout in progress"></span>` : ""}</button>`).join("");
+  document.querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => { key = b.dataset.k; viewing = null; last = {}; writeHash(); loadDoc = true; tick(true); }));
+}
+
+function stageBar(r, checks) {
+  const plan = r.plan;
+  return `<div class="stages">${plan.stages.map((s, i) => {
+    const mine = checks.filter((c) => c.stage === i);
+    let cls = "", sub = `${s.percent ? `${s.percent}% of traffic` : "1 colo"}`;
+    if (r.status === "completed" || i < r.stage) cls = "done";
+    if (i === r.stage && r.status === "running") { cls = "now"; sub = `check ${mine.length} of ${plan.checks}${mine.length > plan.checks ? " (extended)" : ""}`; }
+    if (r.status === "waiting_for_approval" && i === plan.approveBefore) { cls = "wait"; sub = "waiting for a yes"; }
+    if (r.status === "rolled_back" && i === r.stage) { cls = "failed"; sub = "rolled back here"; }
+    return `<div class="stage ${cls}">${esc(s.name)}<small>${esc(sub)}</small></div>`;
+  }).join("")}</div>`;
+}
+
+function renderCurrent(k, detail) {
+  const r = k.rollout;
+  let html = `<div class="summary"><span>stable <b class="mono">${short(k.stable)}</b></span>`;
+  if (!r) {
+    html += `<span>no rollout in progress</span></div><p class="empty">Pick a version on the right and press Roll out. Each stage bakes, is checked against the same colos before the rollout and against the colos still on the old version, and rolls back on its own if it got worse.</p>`;
+    $("current").innerHTML = `<h2>${esc(k.key)}</h2>${html}`;
+    return;
+  }
+  const checks = detail?.checks ?? [];
+  const lastCheck = checks.at(-1);
+  html += `<span>rolling out <b class="mono">${short(r.version)}</b></span><span>started ${ago(r.started_at)}</span><span>on ${r.colos.length} of 24 colos</span></div>`;
+  html += stageBar(r, checks);
+  if (r.status === "waiting_for_approval") {
+    const next = r.plan.stages[r.plan.approveBefore];
+    html += `<div class="callout">Every stage so far passed. Going to <b>${esc(next.name)}</b> needs a yes. No answer within ${Math.round(r.plan.approvalTimeoutMs / 3600000)}h (simulated) rolls back.
+      <div class="row"><button class="act primary" id="yes">Approve ${esc(next.name)}</button><button class="act" id="no">Decline</button></div></div>`;
+  } else if (lastCheck) {
+    html += `<p class="hint">Last check: <span class="v-${lastCheck.verdict}">${esc(lastCheck.verdict)}</span>${lastCheck.reasons.length ? `, ${esc(lastCheck.reasons.join("; "))}` : ""}</p>`;
+  }
+  html += `<div class="row"><button class="act" id="abort">Abort and roll back</button></div>`;
+  $("current").innerHTML = `<h2>${esc(k.key)}</h2>${html}`;
+  if ($("yes")) $("yes").onclick = () => act($("yes"), () => api(`/api/rollouts/${r.id}/approval`, { approved: true, by: author() }), "Approved. The last stage is starting.");
+  if ($("no")) $("no").onclick = () => act($("no"), () => api(`/api/rollouts/${r.id}/approval`, { approved: false, by: author() }), "Declined. Every colo is going back to the stable version.");
+  twoStep($("abort"), "Confirm: roll back now", () => act($("abort"), () => api(`/api/rollouts/${r.id}/abort`, { by: author() }), "Rolled back. Every colo is on the stable version again; edges pick it up within a minute."));
+}
+
+function renderColos(k) {
+  const regions = [...new Set(k.colos.map((c) => c.region))];
+  $("colos").innerHTML = regions.map((rg) => `<div class="region"><h3>${esc(rg)}</h3><div class="colos">${k.colos.filter((c) => c.region === rg).map((c) => {
+    const isNew = c.version !== k.stable;
+    const hot = c.errorRate > 0.01;
+    return `<div class="colo ${isNew ? "new" : ""} ${hot ? "hot" : ""}" title="${esc(c.code)}: version ${esc(c.version)}, ${c.weight} traffic units"><b>${esc(c.code)}</b><span>${pct(c.errorRate)}</span><span>${Math.round(c.p95)}ms</span></div>`;
+  }).join("")}</div></div>`).join("");
+}
+
+function renderChecks(detail) {
+  if (!detail) { $("checks-for").textContent = ""; $("checks").innerHTML = `<p class="empty">Pick a rollout to see its checks.</p>`; return; }
+  $("checks-for").innerHTML = `${esc(detail.id)} · <span class="v-${detail.status}">${esc(detail.status.replace(/_/g, " "))}</span>${detail.reason ? ` · ${esc(detail.reason)}` : ""}`;
+  if (!detail.checks.length) { $("checks").innerHTML = `<p class="empty">No checks yet. The first one runs after the first part of the canary bake.</p>`; return; }
+  $("checks").innerHTML = `<table><tr><th>stage</th><th>#</th><th>verdict</th><th>requests</th><th>errors now / before</th><th>old version now</th><th>p95 rise</th><th>why</th></tr>${detail.checks.map((c) => `<tr>
+    <td>${esc(detail.plan.stages[c.stage]?.name)}</td><td>${c.n + 1}</td><td class="v-${c.verdict}">${esc(c.verdict)}</td><td>${c.stats.requests.toLocaleString()}</td>
+    <td>${pct(c.stats.errorRate)} / ${pct(c.stats.baseErrorRate)}</td><td>${pct(c.stats.controlErrorRate)}</td>
+    <td>${c.stats.latencyRise.toFixed(1)}ms${c.stats.controlLatencyRise != null ? ` <span class="meta">(old ${c.stats.controlLatencyRise.toFixed(1)})</span>` : ""}</td>
+    <td>${esc(c.reasons.join("; "))}</td></tr>`).join("")}</table>`;
+}
+
+function renderRollouts(list) {
+  $("rollouts").innerHTML = list.length ? `<table><tr><th>rollout</th><th>version</th><th>status</th><th>started</th><th>reason</th></tr>${list.map((r) => `<tr class="${r.id === viewing ? "sel" : ""}">
+    <td><a class="link" data-ro="${esc(r.id)}">${esc(r.id)}</a></td><td>${short(r.version)}</td><td class="v-${r.status}">${esc(r.status.replace(/_/g, " "))}</td><td>${ago(r.started_at)}</td><td>${esc(r.reason || "")}</td></tr>`).join("")}</table>` : `<p class="empty">None yet.</p>`;
+  document.querySelectorAll("[data-ro]").forEach((a) => (a.onclick = () => { viewing = a.dataset.ro; last.detail = ""; writeHash(); tick(true); }));
+}
+
+function renderVersions(k, info) {
+  const busy = !!k.rollout;
+  $("versions").innerHTML = `<table><tr><th>id</th><th>by</th><th>note</th><th>saved</th><th></th></tr>${info.versions.map((v) => {
+    const warnings = JSON.parse(v.warnings);
+    const btn = v.id === k.stable ? `<span class="meta">stable</span>` : k.rollout?.version === v.id ? `<span class="v-running">rolling out</span>`
+      : `<button class="act" data-v="${esc(v.id)}" ${busy ? "disabled title='one rollout at a time'" : ""}>Roll out</button>`;
+    return `<tr><td><a class="link" data-load="${esc(v.id)}" title="load into the editor">${short(v.id)}</a></td><td>${esc(v.author)}</td><td>${esc(v.note)}${warnings.length ? `<div class="warnings" style="padding:0;margin:0">${warnings.map(esc).join("<br>")}</div>` : ""}</td><td>${ago(v.created_at)}</td><td>${btn}</td></tr>`;
+  }).join("")}</table>`;
+  document.querySelectorAll("[data-v]").forEach((b) => (b.onclick = () => act(b, () => api(`/api/keys/${encodeURIComponent(key)}/rollouts`, { version: b.dataset.v, author: author(), plan: plan() }),
+    (r) => { viewing = r.id; writeHash(); return `Started ${r.id}. The canary bake runs first.`; })));
+  document.querySelectorAll("[data-load]").forEach((a) => (a.onclick = () => {
+    const v = info.versions.find((x) => x.id === a.dataset.load);
+    $("doc").value = JSON.stringify(JSON.parse(v.doc), null, 2); $("validation").innerHTML = "";
+  }));
+  $("f-version").innerHTML = `<option value="">every colo, any version</option>` + info.versions.map((v) => `<option value="${esc(v.id)}">version ${short(v.id)}${v.id === k.stable ? " (stable)" : ""}</option>`).join("");
+}
+
+// The default plan, with or without the approval before the last stage.
+function plan() {
+  const M = 60000;
+  return {
+    stages: [
+      { name: "canary", percent: 0, bakeMs: 15 * M }, { name: "5%", percent: 5, bakeMs: 10 * M }, { name: "25%", percent: 25, bakeMs: 10 * M },
+      { name: "50%", percent: 50, bakeMs: 10 * M }, { name: "everywhere", percent: 100, bakeMs: 10 * M },
+    ],
+    approveBefore: $("approve").checked ? 4 : -1,
+  };
+}
+
+function renderFaults(faults) {
+  const mine = faults.filter((f) => f.key === key);
+  $("faults").innerHTML = mine.length ? `<table>${mine.map((f) => `<tr><td>${f.version ? short(f.version) : "every colo"}${f.region ? `, ${esc(f.region)}` : ""}: ${f.error_rate ? `+${pct(f.error_rate, 1)} errors` : ""}${f.error_rate && f.latency_ms ? ", " : ""}${f.latency_ms ? `+${f.latency_ms}ms` : ""}</td><td>${ago(f.created_at)}</td><td><button class="act" data-clear="${f.id}">Clear</button></td></tr>`).join("")}</table>`
+    : `<p class="hint">Make one version, or the whole fleet, look broken and watch the gate react. Faults on every colo should hold a rollout, not blame the version.</p>`;
+  document.querySelectorAll("[data-clear]").forEach((b) => (b.onclick = () => act(b, () => api(`/api/faults/${b.dataset.clear}/clear`, {}), "Cleared.")));
+}
+
+$("save").onclick = () => {
+  let doc;
+  try { doc = JSON.parse($("doc").value); } catch (e) { $("validation").innerHTML = `<ul class="errors"><li>not valid JSON: ${esc(e.message)}</li></ul>`; return; }
+  act($("save"), async () => {
+    const r = await api(`/api/keys/${encodeURIComponent(key)}/versions`, { doc, author: author(), note: $("note").value.trim() });
+    $("validation").innerHTML = r.ok
+      ? (r.warnings.length ? `<ul class="warnings">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "")
+      : `<ul class="errors">${r.errors.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>`;
+    if (!r.ok) throw new Error("Not saved: fix the errors below the editor.");
+    return r;
+  }, (r) => r.created ? `Saved ${short(r.id)}.${r.stable ? " It's the first version, so it's stable." : " Roll it out from the list."}` : `That document is already saved as ${short(r.id)}.`);
+};
+$("f-add").onclick = () => act($("f-add"), () => api("/api/faults", {
+  key, version: $("f-version").value || null, region: $("f-region").value || null,
+  errorRate: Number($("f-err").value) / 100, latencyMs: Number($("f-lat").value),
+}), "Injected. Colos it applies to will look worse from now on.");
+
+let loadDoc = true;
+async function tick(force = false) {
+  if (document.hidden && !force) return;
+  try {
+    state = await api("/api/state");
+    $("conn").textContent = ""; $("conn").className = "meta";
+    $("clock").textContent = state.timeScale > 1 ? `time runs ${state.timeScale}x: a 10 minute bake takes ${Math.round(600 / state.timeScale)}s` : "real time";
+    if (!state.keys.length) {
+      $("tabs").innerHTML = "";
+      $("current").innerHTML = `<p class="empty">No config yet.</p><button class="act primary" id="seed">Load demo configs</button>`;
+      $("seed").onclick = () => act($("seed"), () => api("/api/seed", {}), "Loaded a stable version and one candidate for each config.");
+      return;
+    }
+    if (!key || !state.keys.some((k) => k.key === key)) { key = state.keys[0].key; writeHash(); }
+    const k = state.keys.find((x) => x.key === key);
+    if (!viewing && k.rollout) viewing = k.rollout.id;
+    const [info, detail, events] = await Promise.all([
+      api(`/api/keys/${encodeURIComponent(key)}`),
+      viewing ? api(`/api/rollouts/${encodeURIComponent(viewing)}`).catch(() => null) : null,
+      api("/api/events?limit=40"),
+    ]);
+    keyInfo = info;
+    if (changed("tabs", [state.keys.map((x) => [x.key, !!x.rollout]), key])) renderTabs();
+    const active = k.rollout && detail?.id === k.rollout.id ? detail : null;
+    if (changed("current", [k.key, k.stable, k.rollout, active?.checks, Math.floor(Date.now() / 30000)])) renderCurrent(k, active);
+    if (changed("colos", k.colos)) renderColos(k);
+    if (changed("detail", detail)) renderChecks(detail);
+    if (changed("rollouts", [info.rollouts, viewing])) renderRollouts(info.rollouts);
+    if (changed("versions", [info.versions, k.stable, k.rollout?.version])) renderVersions(k, info);
+    if (changed("faults", [state.faults, key])) renderFaults(state.faults);
+    if (loadDoc) {
+      const stable = info.versions.find((v) => v.id === k.stable);
+      if (stable) { $("doc").value = JSON.stringify(JSON.parse(stable.doc), null, 2); $("validation").innerHTML = ""; }
+      loadDoc = false;
+    }
+    $("events").innerHTML = events.map((e) => `<tr><td style="white-space:nowrap;color:var(--muted)">${ago(e.at)}</td><td>${esc(e.key)}</td><td>${esc(e.detail)}</td></tr>`).join("") || `<tr><td class="empty">Nothing yet.</td></tr>`;
+  } catch (e) {
+    $("conn").textContent = `can't reach the API (${e.message}), retrying`; $("conn").className = "meta bad";
+  }
+}
+$("f-region").innerHTML += ["apac", "europe", "namerica", "samerica", "mea"].map((r) => `<option>${r}</option>`).join("");
+addEventListener("hashchange", () => { readHash(); last = {}; loadDoc = true; tick(true); });
+tick(true);
+setInterval(tick, 2000);
+document.addEventListener("visibilitychange", () => tick());
+</script>
 </body>
 </html>
