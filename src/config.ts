@@ -150,4 +150,26 @@ export class ConfigObject extends DurableObject<Env> {
     if (a?.id !== rolloutId) throw new Error(`${CONFLICT}: rollout ${rolloutId} is no longer in progress`);
     return a;
   }
+
+  async assign(rolloutId: string, stage: number, colos: string[], label: string): Promise<void> {
+    const a = this.require(rolloutId);
+    if (a.stage === stage) return;
+    this.sql.exec("UPDATE active SET stage = ?, colos = ?, status = 'running' WHERE id = ?", stage, JSON.stringify(colos), rolloutId);
+    await this.publish({ kind: "stage", detail: `${label}: ${a.version} on ${colos.length} colos`, rollout: rolloutId }, () => this.projectActive());
+  }
+
+  async waiting(rolloutId: string, label: string): Promise<void> {
+    this.require(rolloutId);
+    this.sql.exec("UPDATE active SET status = 'waiting_for_approval' WHERE id = ?", rolloutId);
+    await this.publish({ kind: "approval", detail: `waiting for a yes before ${label}`, rollout: rolloutId }, () => this.projectActive());
+  }
+
+  async finish(rolloutId: string): Promise<void> {
+    const a = this.require(rolloutId);
+    this.sql.exec("UPDATE meta SET v = ? WHERE k = 'stable'", a.version);
+    this.sql.exec("DELETE FROM active");
+    await this.publish({ kind: "completed", detail: `${a.version} is stable everywhere`, rollout: rolloutId }, () =>
+      this.env.DB.prepare("UPDATE rollouts SET status = 'completed', ended_at = ? WHERE id = ?").bind(Date.now(), rolloutId),
+    );
+  }
 }
