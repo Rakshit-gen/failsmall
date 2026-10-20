@@ -163,3 +163,47 @@ describe("approval", () => {
     expect((await SELF.fetch(`http://x/api/rollouts/${id}/abort`, { method: "POST", body: JSON.stringify({ by: "ana" }) })).status).toBe(409);
   });
 });
+
+describe("one rollout at a time", () => {
+  it("refuses a second rollout of a key while one is in progress", async () => {
+    const { key, candidate, cfg } = await fresh();
+    const other = (await cfg.propose(key, doc(240), "test", "")) as { id: string };
+    await using all = await introspectWorkflow(env.ROLLOUT);
+    await all.modifyAll(async (m) => {
+      await m.disableSleeps();
+      await m.mockEvent({ type: "approval", payload: { approved: true, by: "ana" } });
+    });
+    const start = (version: string) =>
+      SELF.fetch(`http://x/api/keys/${key}/rollouts`, { method: "POST", body: JSON.stringify({ version, author: "test" }) });
+    const statuses = (await Promise.all([start(candidate), start(other.id)])).map((r) => r.status).sort();
+    expect(statuses).toEqual([201, 409]);
+    const [instance] = await all.get();
+    await instance.waitForStatus("complete");
+  });
+
+  it("refuses to roll out the stable version or one it has never seen", async () => {
+    const { key, stable } = await fresh();
+    const start = (version: string) => SELF.fetch(`http://x/api/keys/${key}/rollouts`, { method: "POST", body: JSON.stringify({ version, author: "test" }) });
+    expect((await start(stable)).status).toBe(409);
+    expect((await start("000000000000")).status).toBe(404);
+  });
+});
+
+describe("the edge read", () => {
+  it("serves each colo the version its stage gives it", async () => {
+    const { key, cfg, stable, candidate } = await fresh();
+    await cfg.begin("ro-manual", candidate, PLAN());
+    await cfg.assign("ro-manual", 0, ["SIN"], "canary");
+    expect(await served(key, "SIN")).toBe(candidate);
+    expect(await served(key, "fra")).toBe(stable);
+    const body = await (await SELF.fetch(`http://x/cfg/${key}?colo=SIN`)).json();
+    expect(body).toEqual(doc(120));
+
+    expect(await cfg.rollback("ro-manual", "test")).toEqual({ rolledBack: true });
+    expect(await cfg.rollback("ro-manual", "test")).toEqual({ rolledBack: false });
+    const late = await cfg.assign("ro-manual", 1, ["SIN", "FRA"], "25%").then(() => null, (e: Error) => e.message);
+    expect(late).toMatch(/no longer in progress/);
+    expect(await served(key, "SIN")).toBe(stable);
+    expect((await SELF.fetch(`http://x/cfg/${key}?colo=XXX`)).status).toBe(400);
+  });
+});
