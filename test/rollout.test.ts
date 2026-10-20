@@ -73,3 +73,33 @@ describe("a healthy rollout", () => {
     expect(row).toEqual({ status: "completed", from_version: stable });
   });
 });
+
+describe("rolling back", () => {
+  it("stops at the first failing check and puts every colo back on the old version", async () => {
+    const { key, stable, candidate } = await fresh();
+    await fault(key, { version: candidate, errorRate: 0.03 });
+    const { id, out } = await run(key, candidate, PLAN());
+    expect(out.status).toBe("rolled_back");
+    expect((out as { reason: string }).reason).toMatch(/^canary: error rate \d\.\d\d% against 0\.\d\d% before/);
+    // It didn't wait for the bake to end.
+    expect(await checks(id)).toHaveLength(1);
+    expect(await assignment(key)).toEqual({ stable });
+    expect(await served(key, coloSet(id, 0)[0])).toBe(stable);
+  });
+
+  it("catches a regional regression at the first stage that reaches the region", async () => {
+    const { key, candidate } = await fresh();
+    await fault(key, { version: candidate, region: "apac", errorRate: 0.04 });
+    const id = `ro-${key.replace(".", "_")}-${n + 1}`;
+    const plan = PLAN();
+    const first = plan.stages.find((s) => coloSet(id, s.percent).some((c) => COLO.get(c)!.region === "apac"))!;
+    const { out } = await run(key, candidate, plan);
+    expect((out as { reason: string }).reason.startsWith(`${first.name}: error rate`)).toBe(true);
+  });
+
+  it("fails on latency", async () => {
+    const { key, candidate } = await fresh();
+    await fault(key, { version: candidate, latencyMs: 40 });
+    const { out } = await run(key, candidate, PLAN());
+    expect((out as { reason: string }).reason).toMatch(/^canary: p95 up (3[5-9]|4[0-5])\.\dms on the new version/);
+  });
