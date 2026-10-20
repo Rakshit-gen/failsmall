@@ -59,3 +59,25 @@ propose → validate → canary (1 colo, 15m) → 5% → 25% → 50% → [approv
 | `POST /api/faults/:id/clear` | demo |
 
 There's no auth. Put Cloudflare Access in front of it before giving it a public URL.
+
+## Measured vs Claimed
+
+| Claim | Value | How measured | Date |
+|---|---|---|---|
+| Healthy versions rolled back by mistake | 0 of 1000 end-of-bake checks | `test/units.test.ts`, 200 simulated rollouts × 5 stages of the default plan | 2026-10-20 |
+| 2% error regressions missed | 0 of 1000 end-of-bake checks | same test, same 200 rollouts with a +2 point error fault on the new version | 2026-10-20 |
+| Concurrent starts of two rollouts on one key | one 201, one 409 | `test/rollout.test.ts` | 2026-10-20 |
+| Version with +3 points of errors | rolled back at the canary, 2.18% against 0.12% before | `wrangler dev` locally at `TIME_SCALE=60`, fault injected through the API | 2026-10-20 |
+
+These numbers are against the simulator, whose noise model I wrote. They show the gate does what it says on that traffic, not how it would do on real colos.
+
+## Status
+
+Works: validation, versions, the per-key lock, the workflow with every stage, the checks, extensions, approval, abort, rollback, the edge read and the console. 30 tests cover colo selection, the statistics, the simulator, validation, plans, and rollouts end to end (healthy, an error regression, a regional regression caught at the first stage that reaches the region, latency, a fleet-wide incident that holds then rolls back, too little traffic, approval yes, no and timeout, abort while waiting, and concurrent starts).
+
+Limits:
+
+- KV is eventually consistent, so a rollback can take up to about 60 seconds to reach every colo's reads.
+- At the last stage there are no colos left on the old version to act as a control. A fleet-wide incident that starts during the final bake gets blamed on the version and rolls it back. That's the safe direction to be wrong in, but it is wrong.
+- Health comes only from the simulator. Plugging in real numbers (Workers Analytics Engine, or GraphQL analytics per colo) means replacing `windowTotals` in `src/telemetry.ts`.
+- It hasn't been deployed.
