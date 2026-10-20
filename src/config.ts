@@ -172,4 +172,20 @@ export class ConfigObject extends DurableObject<Env> {
       this.env.DB.prepare("UPDATE rollouts SET status = 'completed', ended_at = ? WHERE id = ?").bind(Date.now(), rolloutId),
     );
   }
+
+  // Puts every colo back on the stable version. Safe to call twice; the
+  // second call finds nothing in progress.
+  async rollback(rolloutId: string, reason: string): Promise<{ rolledBack: boolean }> {
+    const a = this.active();
+    if (a?.id !== rolloutId) return { rolledBack: false };
+    this.sql.exec("DELETE FROM active");
+    await this.publish({ kind: "rolled_back", detail: reason, rollout: rolloutId }, () =>
+      this.env.DB.prepare("UPDATE rollouts SET status = 'rolled_back', reason = ?, ended_at = ? WHERE id = ?").bind(reason, Date.now(), rolloutId),
+    );
+    return { rolledBack: true };
+  }
+
+  doc(id: string): string | null {
+    return (this.sql.exec("SELECT doc FROM versions WHERE id = ?", id).toArray()[0]?.doc as string) ?? null;
+  }
 }
