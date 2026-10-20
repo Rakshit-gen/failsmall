@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>failsmall</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #f4f3ef; --panel: #fff; --ink: #1d1d1b; --muted: #6b6a64; --line: #d9d7cf; --soft: #ecebe5;
+    --old: #b9b7ae; --new: #3d6fb6; --ok: #3f8f4f; --warn: #a96d12; --bad: #c4432f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161614; --panel: #1f1f1c; --ink: #e9e7df; --muted: #9a988f; --line: #34332f; --soft: #292824; --old: #55534d; --new: #5a8bd0; --warn: #d39b2a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif; }
+  .mono, td, code, textarea { font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 12.5px; }
+  header { display: flex; flex-wrap: wrap; gap: 6px 20px; align-items: baseline; padding: 14px 20px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  .meta { color: var(--muted); }
+  #flash { flex-basis: 100%; min-height: 1.45em; font-size: 12.5px; }
+  #flash.bad, #conn.bad { color: var(--bad); }
+  nav { display: flex; gap: 0; border-bottom: 1px solid var(--line); padding: 0 20px; overflow-x: auto; }
+  nav button { font: inherit; background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 14px 8px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+  nav button .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--new); margin-left: 6px; vertical-align: 1px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 400px; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } aside { border-left: 0 !important; border-top: 1px solid var(--line); } }
+  section { padding: 16px 20px; border-bottom: 1px solid var(--line); }
+  aside { border-left: 1px solid var(--line); }
+  h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; }
+  h2 .n { color: var(--muted); font-weight: 400; }
+  .empty, .hint { color: var(--muted); font-size: 13px; }
+  .hint { font-size: 12.5px; margin: 6px 0 0; }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; word-break: break-word; }
+  button.act, select, input, textarea { font: inherit; font-size: 12.5px; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 4px 8px; }
+  button.act { cursor: pointer; }
+  button.act:hover { border-color: var(--ink); }
+  button.act.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  button.act.confirm { background: var(--bad); border-color: var(--bad); color: #fff; }
+  button.act:disabled { opacity: .5; cursor: default; }
+  textarea { width: 100%; min-height: 150px; resize: vertical; font-size: 12px; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  label { font-size: 12.5px; color: var(--muted); display: inline-flex; gap: 4px; align-items: center; }
+  .summary { display: flex; flex-wrap: wrap; gap: 4px 22px; margin-bottom: 12px; }
+  .summary span { color: var(--muted); }
+  .summary b { font-weight: 500; color: var(--ink); }
+  .stages { display: flex; gap: 3px; margin: 10px 0 4px; }
+  .stage { flex: 1; min-width: 0; border-top: 4px solid var(--soft); padding-top: 5px; font-size: 12px; color: var(--muted); }
+  .stage.done { border-top-color: var(--ok); color: var(--ink); }
+  .stage.now { border-top-color: var(--new); color: var(--ink); font-weight: 500; }
+  .stage.wait { border-top-color: var(--warn); color: var(--ink); font-weight: 500; }
+  .stage.failed { border-top-color: var(--bad); color: var(--bad); }
+  .stage small { display: block; font-weight: 400; color: var(--muted); }
+  .regions { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+  .region h3 { font-size: 12px; font-weight: 500; color: var(--muted); margin: 0 0 5px; }
+  .colos { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+  .colo { padding: 4px 5px; background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--old); font-size: 11.5px; line-height: 1.25; }
+  .colo.new { border-left-color: var(--new); }
+  .colo.hot { border-color: var(--bad); }
+  .colo b { font-family: "IBM Plex Mono", monospace; font-weight: 500; font-size: 12px; }
+  .colo span { display: block; color: var(--muted); font-family: "IBM Plex Mono", monospace; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; vertical-align: -1px; }
+  .v-pass, .v-completed { color: var(--ok); } .v-fail, .v-rolled_back { color: var(--bad); } .v-hold, .v-insufficient, .v-waiting_for_approval { color: var(--warn); } .v-watching, .v-running { color: var(--new); }
+  .callout { border-left: 3px solid var(--warn); background: var(--panel); padding: 8px 12px; margin: 10px 0; }
+  .callout.bad { border-left-color: var(--bad); }
+  .errors { color: var(--bad); font-size: 12.5px; margin: 6px 0 0; padding-left: 18px; }
+  .warnings { color: var(--warn); font-size: 12.5px; margin: 6px 0 0; padding-left: 18px; }
+  a.link { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 2px; cursor: pointer; }
+  a.link:hover { text-decoration-color: var(--ink); }
+  tr.sel td { background: var(--soft); }
+</style>
+</head>
+<body>
+<header>
+  <h1>failsmall</h1>
+  <span class="meta" id="clock"></span>
+  <span class="meta">simulated fleet of 24 colos; health comes from a telemetry simulator</span>
+  <span class="meta" id="conn" style="margin-left:auto"></span>
+  <span id="flash" role="status" aria-live="polite"></span>
+</header>
+<nav id="tabs" role="tablist" aria-label="Config keys"></nav>
+<main>
+  <div>
+    <section id="current"><p class="empty">Loading…</p></section>
+    <section>
+      <h2>Colos</h2>
+      <div class="legend"><span><i style="background:var(--old)"></i>stable version</span><span><i style="background:var(--new)"></i>new version</span><span>each shows error rate and p95 over the last 5 minutes</span></div>
+      <div class="regions" id="colos"></div>
+    </section>
+    <section id="checks-section">
+      <h2>Health checks <span class="n" id="checks-for"></span></h2>
+      <div class="scroll" id="checks"></div>
+    </section>
+    <section>
+      <h2>Recent rollouts</h2>
+      <div class="scroll" id="rollouts"></div>
+    </section>
+  </div>
+  <aside>
+    <section>
+      <h2>Versions</h2>
+      <div class="scroll" id="versions"></div>
+      <div class="row">
+        <label><input type="checkbox" id="approve" checked> ask before going everywhere</label>
+      </div>
+    </section>
+    <section>
+      <h2>New version</h2>
+      <textarea id="doc" spellcheck="false" aria-label="Config document (JSON)"></textarea>
+      <div class="row">
+        <input id="author" placeholder="your name" aria-label="Author" style="width:120px">
+        <input id="note" placeholder="what changed" aria-label="Note" style="flex:1;min-width:120px">
+        <button class="act primary" id="save">Validate and save</button>
+      </div>
+      <div id="validation"></div>
+      <p class="hint">Saved versions are content-addressed: the same document always gets the same id. A version that fails validation is never saved, so it can't be rolled out.</p>
+    </section>
+    <section>
+      <h2>Inject a regression <span class="n">demo</span></h2>
+      <div class="row">
+        <select id="f-version" aria-label="Affected version"></select>
+        <select id="f-region" aria-label="Affected region"><option value="">every region</option></select>
+      </div>
+      <div class="row">
+        <label>errors +<input id="f-err" type="number" min="0" max="100" step="0.5" value="3" style="width:62px">%</label>
+        <label>p95 +<input id="f-lat" type="number" min="0" max="5000" step="5" value="0" style="width:62px">ms</label>
+        <button class="act" id="f-add">Inject</button>
+      </div>
+      <div id="faults"></div>
+    </section>
+    <section>
+      <h2>Events</h2>
+      <div class="scroll"><table><tbody id="events"></tbody></table></div>
+    </section>
+  </aside>
+</main>
+</body>
+</html>
