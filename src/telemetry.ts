@@ -55,3 +55,30 @@ export function coloMinute(code: string, version: string, minute: number, scale:
   const p95 = colo.baseP95 + latency + 2.5 * gauss(`${seed}:l`);
   return { requests, errors, p95 };
 }
+
+// Totals over colos for a window, each colo on the version given for it.
+export function windowTotals(
+  colos: { code: string; version: string }[],
+  fromMs: number,
+  toMs: number,
+  scale: number,
+  key: string,
+  faults: Fault[],
+): Totals {
+  const [first, end] = minuteRange(fromMs, toMs, scale);
+  let requests = 0, errors = 0, latencySum = 0;
+  for (const { code, version } of colos) {
+    for (let m = first; m < end; m++) {
+      const s = coloMinute(code, version, m, scale, key, faults);
+      requests += s.requests;
+      errors += s.errors;
+      latencySum += s.p95 * s.requests;
+    }
+  }
+  return { requests, errors, p95: requests ? latencySum / requests : 0, minutes: Math.max(0, end - first) };
+}
+
+export async function loadFaults(db: D1Database, key: string): Promise<Fault[]> {
+  const r = await db.prepare("SELECT key, version, region, error_rate, latency_ms, created_at, cleared_at FROM faults WHERE key = ?").bind(key).all<Fault>();
+  return r.results;
+}
