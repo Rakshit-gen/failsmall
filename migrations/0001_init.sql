@@ -33,3 +33,38 @@ CREATE TABLE rollouts (
   ended_at INTEGER
 );
 CREATE INDEX rollouts_by_key ON rollouts (key, started_at DESC);
+
+-- One row per health check during a stage's bake.
+CREATE TABLE checks (
+  rollout_id TEXT NOT NULL,
+  stage INTEGER NOT NULL,
+  n INTEGER NOT NULL,
+  verdict TEXT NOT NULL CHECK (verdict IN ('pass', 'fail', 'insufficient', 'hold', 'watching')),
+  reasons TEXT NOT NULL,
+  stats TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (rollout_id, stage, n)
+);
+
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,
+  rollout_id TEXT,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  at INTEGER NOT NULL
+);
+CREATE INDEX events_at ON events (at DESC);
+
+-- Demo only: regressions the telemetry simulator adds to colos running a
+-- version (or every colo, when version is null).
+CREATE TABLE faults (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  key TEXT NOT NULL,
+  version TEXT,
+  region TEXT,
+  error_rate REAL NOT NULL DEFAULT 0,
+  latency_ms REAL NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  cleared_at INTEGER
+);
