@@ -73,4 +73,34 @@ export class ConfigObject extends DurableObject<Env> {
       ...(a && a.stage >= 0 ? { rollout: { id: a.id, version: a.version, colos: JSON.parse(a.colos) } } : {}),
     };
   }
+
+  // Writes are queued so they land in the order the changes were made. Each
+  // write reads the state when it runs, so KV ends on the latest assignment
+  // even if two changes are made back to back.
+  private publish(event: { kind: string; detail: string; rollout?: string }, rolloutRow?: () => D1PreparedStatement | null): Promise<void> {
+    const key = this.key();
+    const run = async () => {
+      const a = this.assignment();
+      await this.env.EDGE.put(assignmentKey(key), JSON.stringify(a));
+      const stmts = [
+        this.env.DB.prepare("INSERT INTO keys (key, stable, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET stable = excluded.stable, updated_at = excluded.updated_at").bind(key, a.stable, Date.now()),
+        this.env.DB.prepare("INSERT INTO events (key, rollout_id, kind, detail, at) VALUES (?, ?, ?, ?, ?)").bind(key, event.rollout ?? null, event.kind, event.detail, Date.now()),
+      ];
+      const row = rolloutRow?.();
+      if (row) stmts.push(row);
+      await this.env.DB.batch(stmts);
+    };
+    const p = this.out.then(run);
+    this.out = p.catch(() => {});
+    return p;
+  }
+
+  private projectActive(): D1PreparedStatement | null {
+    const a = this.active();
+    if (!a) return null;
+    return this.env.DB.prepare(
+      `INSERT INTO rollouts (id, key, version, from_version, plan, status, stage, colos, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO UPDATE SET status = excluded.status, stage = excluded.stage, colos = excluded.colos`,
+    ).bind(a.id, this.key(), a.version, a.from_version, a.plan, a.status, a.stage, a.colos, a.started_at);
+  }
 }
