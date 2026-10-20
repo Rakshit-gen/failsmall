@@ -38,3 +38,29 @@ export function hash32(s: string): number {
   }
   return h >>> 0;
 }
+
+// The order a rollout reaches colos in. Each rollout gets its own order, so
+// the same colo isn't always the canary, but a rollout's order never
+// changes, so every stage is a superset of the one before.
+export function rolloutOrder(rolloutId: string): Colo[] {
+  return [...COLOS].sort((a, b) => hash32(`${rolloutId}:${a.code}`) - hash32(`${rolloutId}:${b.code}`));
+}
+
+// Colos for a stage: the canary stage (percent 0) is one colo; any other
+// stage takes colos in rollout order until they carry `percent` of traffic.
+export function coloSet(rolloutId: string, percent: number): string[] {
+  const order = rolloutOrder(rolloutId);
+  if (percent <= 0) return [order[0].code];
+  const out: string[] = [];
+  let share = 0;
+  for (const x of order) {
+    if (share >= percent / 100) break;
+    out.push(x.code);
+    share += x.weight / TOTAL_WEIGHT;
+  }
+  return out;
+}
+
+export function trafficShare(codes: string[]): number {
+  return codes.reduce((a, code) => a + (COLO.get(code)?.weight ?? 0), 0) / TOTAL_WEIGHT;
+}
