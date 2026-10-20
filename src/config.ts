@@ -103,4 +103,28 @@ export class ConfigObject extends DurableObject<Env> {
        ON CONFLICT (id) DO UPDATE SET status = excluded.status, stage = excluded.stage, colos = excluded.colos`,
     ).bind(a.id, this.key(), a.version, a.from_version, a.plan, a.status, a.stage, a.colos, a.started_at);
   }
+
+  async propose(key: string, doc: unknown, author: string, note: string): Promise<Proposed> {
+    const kind = kindOf(key);
+    if (!kind) return { ok: false, errors: [`unknown config key ${key}`] };
+    const v = validate(kind, doc);
+    if (v.errors.length) return { ok: false, errors: v.errors };
+    const id = await versionId(doc);
+    const text = canonical(doc);
+
+    if (!this.meta("key")) this.sql.exec("INSERT INTO meta (k, v) VALUES ('key', ?)", key);
+    const created = this.sql.exec("INSERT OR IGNORE INTO versions (id, doc, created_at) VALUES (?, ?, ?)", id, text, Date.now()).rowsWritten > 0;
+    // The first version of a key has nothing to protect, so it is stable at once.
+    const bootstrap = !this.stable();
+    if (bootstrap) this.sql.exec("INSERT INTO meta (k, v) VALUES ('stable', ?)", id);
+
+    if (created) {
+      await this.env.EDGE.put(docKey(key, id), text);
+      await this.env.DB.prepare("INSERT OR IGNORE INTO versions (key, id, doc, author, note, warnings, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(key, id, text, author, note, JSON.stringify(v.warnings), Date.now())
+        .run();
+    }
+    if (bootstrap) await this.publish({ kind: "stable", detail: `${id} is the first version, so it is stable` });
+    return { ok: true, id, created, warnings: v.warnings, stable: bootstrap };
+  }
 }
