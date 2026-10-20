@@ -207,3 +207,21 @@ describe("the edge read", () => {
     expect((await SELF.fetch(`http://x/cfg/${key}?colo=XXX`)).status).toBe(400);
   });
 });
+
+describe("versions", () => {
+  it("validates, dedupes by content, and keeps the first version stable", async () => {
+    const key = `waf-rules.t${++n}`;
+    const post = (d: unknown) => SELF.fetch(`http://x/api/keys/${key}/versions`, { method: "POST", body: JSON.stringify({ doc: d, author: "ana" }) });
+    const bad = await post({ rules: [{ id: "all", expression: "true", action: "block" }] });
+    expect(bad.status).toBe(422);
+    expect(await bad.json()).toEqual({ ok: false, errors: ["all blocks every request"] });
+
+    const good = { rules: [{ id: "watch-all", expression: "true", action: "log" }] };
+    const a = await (await post(good)).json<{ id: string; created: boolean; stable: boolean; warnings: string[] }>();
+    expect(a).toMatchObject({ created: true, stable: true, warnings: ["watch-all matches every request"] });
+    const again = await (await post({ rules: [{ action: "log", expression: "true", id: "watch-all" }] })).json<{ id: string; created: boolean }>();
+    expect(again).toMatchObject({ id: a.id, created: false });
+
+    expect((await SELF.fetch(`http://x/api/keys/dns-records/versions`, { method: "POST", body: JSON.stringify({ doc: {}, author: "ana" }) })).status).toBe(404);
+  });
+});
