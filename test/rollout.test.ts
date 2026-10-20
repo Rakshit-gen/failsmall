@@ -103,3 +103,21 @@ describe("rolling back", () => {
     const { out } = await run(key, candidate, PLAN());
     expect((out as { reason: string }).reason).toMatch(/^canary: p95 up (3[5-9]|4[0-5])\.\dms on the new version/);
   });
+
+  it("won't blame or promote a version while the whole fleet is unhealthy", async () => {
+    const { key, stable, candidate } = await fresh();
+    // Starts now, so the windows before the rollout are healthy.
+    await fault(key, { errorRate: 0.03, since: Date.now() });
+    const { id, out } = await run(key, candidate, PLAN());
+    expect((out as { reason: string }).reason).toBe("canary: colos on the old version got worse too, so this can't be judged, still after 2 extra bakes");
+    expect((await checks(id)).map((c) => c.verdict)).toEqual(Array(9).fill("hold"));
+    expect(await assignment(key)).toEqual({ stable });
+  });
+
+  it("never passes a stage that didn't see enough traffic", async () => {
+    const { key, candidate } = await fresh();
+    const { id, out } = await run(key, candidate, PLAN({ thresholds: { minRequests: 1e9 } }));
+    expect((out as { reason: string }).reason).toMatch(/^canary: \d+ requests so far, 1000000000 needed, still after 2 extra bakes$/);
+    expect((await checks(id)).map((c) => c.verdict)).toEqual(Array(9).fill("insufficient"));
+  });
+});
