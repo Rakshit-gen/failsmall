@@ -127,4 +127,27 @@ export class ConfigObject extends DurableObject<Env> {
     if (bootstrap) await this.publish({ kind: "stable", detail: `${id} is the first version, so it is stable` });
     return { ok: true, id, created, warnings: v.warnings, stable: bootstrap };
   }
+
+  // Starting again with the same rollout id returns the rollout already
+  // running, so a retried workflow step is safe.
+  async begin(rolloutId: string, version: string, plan: Plan): Promise<ActiveRollout> {
+    const a = this.active();
+    if (a?.id === rolloutId) return a;
+    if (a) throw new Error(`${CONFLICT}: rollout ${a.id} of ${a.version} is still in progress`);
+    if (!this.sql.exec("SELECT 1 FROM versions WHERE id = ?", version).toArray().length) throw new Error(`${NOT_FOUND}: no version ${version}`);
+    const stable = this.stable();
+    if (version === stable) throw new Error(`${CONFLICT}: ${version} is already stable`);
+    this.sql.exec(
+      "INSERT INTO active (id, version, from_version, plan, status, stage, colos, started_at) VALUES (?, ?, ?, ?, 'running', -1, '[]', ?)",
+      rolloutId, version, stable!, JSON.stringify(plan), Date.now(),
+    );
+    await this.publish({ kind: "started", detail: `rolling out ${version} over ${stable}`, rollout: rolloutId }, () => this.projectActive());
+    return this.active()!;
+  }
+
+  private require(rolloutId: string): ActiveRollout {
+    const a = this.active();
+    if (a?.id !== rolloutId) throw new Error(`${CONFLICT}: rollout ${rolloutId} is no longer in progress`);
+    return a;
+  }
 }
