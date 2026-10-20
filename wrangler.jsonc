@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "failsmall",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./public" },
+  "durable_objects": {
+    "bindings": [{ "name": "CONFIG", "class_name": "ConfigObject" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ConfigObject"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "failsmall",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "kv_namespaces": [{ "binding": "EDGE", "id": "00000000000000000000000000000000" }],
+  "workflows": [{ "name": "failsmall-rollout", "binding": "ROLLOUT", "class_name": "RolloutWorkflow" }],
+  "vars": {
+    // Real durations are divided by this, so a 10 minute bake takes 10 s at 60.
+    "TIME_SCALE": "60"
+  },
+  "observability": { "enabled": true }
+}
