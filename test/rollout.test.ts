@@ -121,3 +121,45 @@ describe("rolling back", () => {
     expect((await checks(id)).map((c) => c.verdict)).toEqual(Array(9).fill("insufficient"));
   });
 });
+
+describe("approval", () => {
+  const plan = PLAN({ approveBefore: 2 });
+
+  it("goes to 100% on a yes", async () => {
+    const { key, candidate } = await fresh();
+    const { out } = await run(key, candidate, plan, (m) => m.mockEvent({ type: "approval", payload: { approved: true, by: "ana" } }));
+    expect(out).toEqual({ status: "completed" });
+  });
+
+  it("rolls back on a no, and when nobody answers", async () => {
+    const a = await fresh();
+    const no = await run(a.key, a.candidate, plan, (m) => m.mockEvent({ type: "approval", payload: { approved: false, by: "ana" } }));
+    expect(no.out).toEqual({ status: "rolled_back", reason: "ana declined everywhere" });
+    expect(await assignment(a.key)).toEqual({ stable: a.stable });
+
+    const b = await fresh();
+    const late = await run(b.key, b.candidate, plan, (m) => m.forceEventTimeout({ name: "approval before everywhere" }));
+    expect(late.out).toEqual({ status: "rolled_back", reason: "nobody approved everywhere in time" });
+  });
+
+  it("can be aborted while it waits, and the edge goes back at once", async () => {
+    const { key, stable, candidate } = await fresh();
+    const id = `ro-${key.replace(".", "_")}-${++n}`;
+    await using wf = await introspectWorkflowInstance(env.ROLLOUT, id);
+    await wf.modify((m) => m.disableSleeps());
+    await startRollout(env, key, { version: candidate, author: "test", plan }, id);
+
+    for (let i = 0; i < 200 && (await env.DB.prepare("SELECT status FROM rollouts WHERE id = ?").bind(id).first("status")) !== "waiting_for_approval"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const on = coloSet(id, 25)[0];
+    expect(await served(key, on)).toBe(candidate);
+
+    const abort = await SELF.fetch(`http://x/api/rollouts/${id}/abort`, { method: "POST", body: JSON.stringify({ by: "ana" }) });
+    expect(abort.status).toBe(200);
+    expect(await served(key, on)).toBe(stable);
+    await wf.waitForStatus("complete");
+    expect(await env.DB.prepare("SELECT status, reason FROM rollouts WHERE id = ?").bind(id).first()).toEqual({ status: "rolled_back", reason: "aborted by ana" });
+    expect((await SELF.fetch(`http://x/api/rollouts/${id}/abort`, { method: "POST", body: JSON.stringify({ by: "ana" }) })).status).toBe(409);
+  });
+});
